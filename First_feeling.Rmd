@@ -11,6 +11,14 @@ opts_chunk$set(warning = FALSE, message = FALSE)
 ```
 
 ```{r}
+source("common.R")
+
+mySeed <- 1234
+```
+
+
+
+```{r}
 train_raw_data <- read.table(file.path(".", "Data", "train.csv"),
                              header = TRUE, sep = ",")
 test_raw_data <- read.table(file.path(".", "Data", "test.csv"),
@@ -100,8 +108,24 @@ hcorr <- findCorrelation(all_data, cutoff = .75)
 length(hcorr)
 ```
 
-##• Transforming predictors
 ```{r}
+unique(all_data[,3])
+featuresDiversity <- lapply(names(all_data[,-c(1,371)]), 
+                            function(x) length(unique(all_data[,x])))
+featuresDiversity <- unlist(featuresDiversity)
+names(featuresDiversity) <- names(all_data[,-c(1,371)])
+featuresDiversity <- featuresDiversity[order(featuresDiversity)]
+
+head(featuresDiversity, 25)
+sum(featuresDiversity==1)
+sum(featuresDiversity<=3)
+sum(featuresDiversity<=5)
+sum(featuresDiversity<=10)
+```
+
+
+## Transforming predictors
+```{r TRANS_PRED, cache = TRUE}
 tmp_data <- all_data[, -c(1, 371)]
 
 trans <- preProcess(tmp_data,
@@ -131,12 +155,12 @@ save(tidy_train, tidy_train,
 ```
 
 ## First (benchmark) model
-```{r}
+```{r MODEL_BCHMK, cache=TRUE}
 library(doParallel)
 cl <- makeCluster(max(detectCores()-1,1))
 registerDoParallel(cl)
 
-set.seed(1234)
+set.seed(mySeed)
 trainingIdx <- createDataPartition(tidy_train$TARGET, list = FALSE)
 
 trainPred  <- tidy_train[trainingIdx, -c(1, ncol(tidy_train))]
@@ -153,17 +177,18 @@ save(trainPred, trainClass, trainIds,
      testPred, testClass, testIds,
      file = file.path(".", "Data", "train_and_test_pred_class_and_ids.Rda"))
 
-
+numCVs <- 3
 trCtrl <- trainControl(method            = "cv",
-                       number            = 3,
+                       number            = numCVs,
                        # repeats           = 3,
                        verboseIter       = TRUE,
-                       savePredictions   = FALSE,
+                       savePredictions   = "final",
                        classProbs        = TRUE,
                        summaryFunction   = twoClassSummary,
-                       allowParallel     = TRUE)
+                       allowParallel     = TRUE,
+                       index             = createFolds(trainClass, numCVs))
 
-set.seed(1234)
+set.seed(mySeed)
 
 fitBchMk <- train(x = trainPred, y = trainClass,
                   method = "glm",
@@ -186,14 +211,6 @@ confusionMatrix(data = myPred, reference = trainClass)
 myPred <- predict(fitBchMk, testPred)
 confusionMatrix(data = myPred, reference = testClass)
 
-modelPerformance <- function(model, predictors, reference, lev, model_name) {
-  myData <- cbind(pred = predict(model, predictors), 
-                obs = reference, 
-                predict(model, predictors, type = "prob"))
-  twoClassSummary(data = myData, lev = lev,
-                model = model_name)
-}
-
 modelPerformance(model = fitBchMk, 
                  predictors = trainPred, 
                  reference= trainClass, 
@@ -214,23 +231,24 @@ submission <- data.frame(ID = tidy_test$ID, TARGET = as.integer(myPred)-1)
 cat("saving the submission file\n")
 write.csv(submission, file.path(".", "Submissions", "submissionBchMk.csv"),
           row.names = F)
+
 ```
 
 0.501289, 3490/3658
 
 
 Stop Parallel Processing
-```{r STOP_PARALLEL}
+```{r STOP_PARALLEL1}
 stopCluster(cl)
 ```
 
 ## Something stronger
-```{r}
+```{r MODEL_XGB, cache=TRUE}
 library(doParallel)
 cl <- makeCluster(max(detectCores()-1,1))
 registerDoParallel(cl)
 
-set.seed(1234)
+set.seed(mySeed)
 
 
 fitXGB1 <- train(x = trainPred, y = trainClass,
@@ -278,6 +296,67 @@ write.csv(submission, file.path(".", "Submissions", "submissionXGB1.csv"),
 0.504080, 3485/3658, +7
 
 Stop Parallel Processing
-```{r STOP_PARALLEL}
+```{r STOP_PARALLEL2}
 stopCluster(cl)
 ```
+
+## Submitting probs
+
+
+```{r}
+# Make a submission
+# myPred <- predict(fitXGB1, tidy_test, type ="prob")
+# submission <- data.frame(ID = tidy_test$ID, TARGET = myPred$UNSATISFIED)
+# write.csv(submission, file.path(".", "Submissions", "submissionXGB2.csv"),
+#           row.names = F)
+makeASubmission(fitXGB1, "submissionXGB2.csv")
+```
+
+0.600876, 3198/3661, +287
+
+```{r}
+# Make a submission
+# myPred <- predict(fitBchMk, tidy_test, type ="prob")
+# submission <- data.frame(ID = tidy_test$ID, TARGET = myPred$UNSATISFIED)
+# write.csv(submission, file.path(".", "Submissions", "submissionBchMk2.csv"),
+#           row.names = F)
+makeASubmission(fitBchMk, "submissionBchMk2.csv")
+```
+
+0.807312, 2723/3661, +475
+
+## Compare models
+```{r}
+# plot(fitBchMk)
+# plot(fitBchMk, metric = "ROC")
+# plot(fitBchMk, metric = "Accuracy")
+# plot(fitBchMk, plotType = "level")
+resampleHist(fitBchMk)
+varImp(fitBchMk, top = 20)
+plot(varImp(fitBchMk, top = 20))
+```
+
+```{r}
+plot(fitXGB1)
+plot(fitXGB1, metric = "ROC")
+plot(fitXGB1, metric = "Sens")
+plot(fitXGB1, metric = "Spec")
+plot(fitXGB1, plotType = "level")
+resampleHist(fitXGB1)
+varImp(fitXGB1, top = 20)
+plot(varImp(fitXGB1, top = 20))
+```
+
+```{r COMPARE_BUNCH}
+resamps <- resamples(list(LogReg = fitBchMk, Xgb = fitXGB1))
+summary(resamps)
+
+xyplot(resamps, what = "BlandAltman")
+dotplot(resamps)
+densityplot(resamps)
+bwplot(resamps)
+splom(resamps)
+parallelplot(resamps)
+
+diffs <- diff(resamps)
+summary(diffs)
