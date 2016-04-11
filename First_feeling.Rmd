@@ -1,0 +1,283 @@
+---
+title: "Exploring Data"
+author: "Miguel Conde"
+date: "10 de abril de 2016"
+output: html_document
+---
+
+```{r}
+library(knitr)
+opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+```{r}
+train_raw_data <- read.table(file.path(".", "Data", "train.csv"),
+                             header = TRUE, sep = ",")
+test_raw_data <- read.table(file.path(".", "Data", "test.csv"),
+                             header = TRUE, sep = ",")
+dim(train_raw_data)
+dim(test_raw_data)
+str(train_raw_data[,1:99])
+str(train_raw_data[,100:199])
+str(train_raw_data[,200:299])
+str(train_raw_data[,300:ncol(train_raw_data)])
+
+summary(train_raw_data[,1:99])
+summary(train_raw_data[,100:199])
+summary(train_raw_data[,200:299])
+summary(train_raw_data[,300:ncol(train_raw_data)])
+
+summary(train_raw_data$TARGET)
+boxplot(train_raw_data$TARGET)
+table(train_raw_data$TARGET)
+prop.table(table(train_raw_data$TARGET))
+
+```
+
+## Possible predictors transformations
+
+- Data Transformations for Single Predictors
+  - Centering and Scaling
+  - Transformations to Resolve Skewness
+    - Replacing the data with the log, square root, or inverse
+    - Box and Cox family of transformations
+- Data Transformations for Multiple Predictors
+  - Transformations to Resolve Outliers
+    - If a model is considered to be sensitive to outliers, one data transformation that can minimize the problem is the **spatial sign**. It is important to center and scale the predictor data prior to using this transformation.Removing predictor variables after applying the spatial sign transformation may be problematic.
+  - Data Reduction and Feature Extraction
+    These methods reduce the data by generating a smaller set of predictors that seek to capture a majority of the information in the original variables. In this way, fewer variables can be used that provide reasonable fidelity to the original data. For most data reduction techniques, the new predictors are
+functions of the original predictors.
+    - PCA: The primary advantage of PCA is that it creates components that are
+uncorrelated. To help PCA avoid summarizing distributional differences and predictor scale information, it is best to first transform skewed predictors  and then center and scale the predictors prior to performing PCA. Visually examining the principal components is a critical step for assessing
+data quality and gaining intuition for the problem. To do this, the first few
+principal components can be plotted against each other and the plot symbols
+can be colored by relevant characteristics, such as the class labels. If PCA
+has captured a sufficient amount of information in the data, this type of plot
+can demonstrate clusters of samples or outliers that may prompt a closer examination of the individual data points. For classification problems, the PCA plot can show potential separation of classes (if there is a separation). This can set the initial expectations of the modeler; if there is little clustering of the classes, the plot of the principal component values will show a significant overlap of the points for each class.
+- Dealing with Missing Values
+- Removing Predictors
+  - zero variance predictor
+  - near-zero variance predictors
+  - Between-Predictor Correlations
+  - Adding Predictors
+    - dummy vars
+    
+    
+## EDA 
+```{r}
+all_data <- test_raw_data
+all_data$TARGET <- rep(NA, nrow(all_data))
+all_data <- rbind(train_raw_data, all_data)
+
+```
+
+ESCALAS
+
+
+```{r}
+summary(all_data[,1:10])
+```
+
+SI
+
+SKEWNESS
+```{r}
+library(e1071)
+skewValues <- apply(all_data, 2, skewness)
+skewValues <- skewValues[order(skewValues, decreasing = TRUE)]
+mostSkewValues <- skewValues[skewValues>20 & !is.na(skewValues)]
+length(mostSkewValues)
+```
+
+SI y gordo
+
+LOW VARIANCE or HIGH CORR
+```{r}
+library(caret)
+nzv <- nearZeroVar(all_data[,-371])
+length(nzv)
+hcorr <- findCorrelation(all_data, cutoff = .75)
+length(hcorr)
+```
+
+##• Transforming predictors
+```{r}
+tmp_data <- all_data[, -c(1, 371)]
+
+trans <- preProcess(tmp_data,
+                    method = c("zv", "nzv", "BoxCox", 
+                               "center", "scale", "pca", "spatialSign"))
+trans
+
+# Apply the transformations:
+transformed <- predict(trans, tmp_data)
+
+dim(transformed)
+head(transformed)
+
+
+new_all_data <- cbind(ID = all_data$ID, transformed, 
+                      TARGET = all_data$TARGET)
+trainIdx <- which(!is.na(new_all_data$TARGET))
+
+tidy_train <- new_all_data[trainIdx,]
+tidy_test  <- new_all_data[-trainIdx,]
+tidy_test$TARGET <- NULL
+
+save(tidy_train, tidy_train, 
+     file = file.path(".", "Data", "tidySets.Rda"))
+
+
+```
+
+## First (benchmark) model
+```{r}
+library(doParallel)
+cl <- makeCluster(max(detectCores()-1,1))
+registerDoParallel(cl)
+
+set.seed(1234)
+trainingIdx <- createDataPartition(tidy_train$TARGET, list = FALSE)
+
+trainPred  <- tidy_train[trainingIdx, -c(1, ncol(tidy_train))]
+trainClass <- factor(tidy_train[trainingIdx, "TARGET"], 
+                     labels = c("SATISFIED", "UNSATISFIED"))
+trainIds <- tidy_train[trainingIdx, 1]
+
+testPred  <- tidy_train[-trainingIdx, -c(1, ncol(tidy_train))]
+testClass <- factor(tidy_train[-trainingIdx, "TARGET"], 
+                     labels = c("SATISFIED", "UNSATISFIED"))
+testIds <- tidy_train[-trainingIdx, 1]
+
+save(trainPred, trainClass, trainIds,
+     testPred, testClass, testIds,
+     file = file.path(".", "Data", "train_and_test_pred_class_and_ids.Rda"))
+
+
+trCtrl <- trainControl(method            = "cv",
+                       number            = 3,
+                       # repeats           = 3,
+                       verboseIter       = TRUE,
+                       savePredictions   = FALSE,
+                       classProbs        = TRUE,
+                       summaryFunction   = twoClassSummary,
+                       allowParallel     = TRUE)
+
+set.seed(1234)
+
+fitBchMk <- train(x = trainPred, y = trainClass,
+                  method = "glm",
+                  preProcess = NULL,
+                  #..., 
+                  weights    = NULL,
+                  metric     = "ROC", 
+                  trControl  = trCtrl, 
+                  tuneGrid   = NULL, 
+                  tuneLength = 3)
+
+save(fitBchMk, 
+     file = file.path(".", "Models", "fitBchMk.Rda"))
+
+fitBchMk
+
+myPred <- predict(fitBchMk, trainPred)
+confusionMatrix(data = myPred, reference = trainClass)
+
+myPred <- predict(fitBchMk, testPred)
+confusionMatrix(data = myPred, reference = testClass)
+
+modelPerformance <- function(model, predictors, reference, lev, model_name) {
+  myData <- cbind(pred = predict(model, predictors), 
+                obs = reference, 
+                predict(model, predictors, type = "prob"))
+  twoClassSummary(data = myData, lev = lev,
+                model = model_name)
+}
+
+modelPerformance(model = fitBchMk, 
+                 predictors = trainPred, 
+                 reference= trainClass, 
+                 lev = c("SATISFIED", "UNSATISFIED"), 
+                 model_name = "glm")
+
+modelPerformance(model = fitBchMk, 
+                 predictors = testPred, 
+                 reference= testClass, 
+                 lev = c("SATISFIED", "UNSATISFIED"), 
+                 model_name = "glm")
+```
+
+```{r}
+# Make a submission
+myPred <- predict(fitBchMk, tidy_test)
+submission <- data.frame(ID = tidy_test$ID, TARGET = as.integer(myPred)-1)
+cat("saving the submission file\n")
+write.csv(submission, file.path(".", "Submissions", "submissionBchMk.csv"),
+          row.names = F)
+```
+
+0.501289, 3490/3658
+
+
+Stop Parallel Processing
+```{r STOP_PARALLEL}
+stopCluster(cl)
+```
+
+## Something stronger
+```{r}
+library(doParallel)
+cl <- makeCluster(max(detectCores()-1,1))
+registerDoParallel(cl)
+
+set.seed(1234)
+
+
+fitXGB1 <- train(x = trainPred, y = trainClass,
+                  method = "xgbLinear",
+                  preProcess = NULL,
+                  #..., 
+                  weights    = NULL,
+                  metric     = "ROC", 
+                  trControl  = trCtrl, 
+                  tuneGrid   = NULL, 
+                  tuneLength = 3)
+
+save(fitXGB1, 
+     file = file.path(".", "Models", "fitXGB1.Rda"))
+
+fitXGB1
+
+myPred <- predict(fitXGB1, trainPred)
+confusionMatrix(data = myPred, reference = trainClass)
+
+myPred <- predict(fitXGB1, testPred)
+confusionMatrix(data = myPred, reference = testClass)
+
+modelPerformance(model = fitXGB1, 
+                 predictors = trainPred, 
+                 reference= trainClass, 
+                 lev = c("SATISFIED", "UNSATISFIED"), 
+                 model_name = "xgbLinear")
+
+modelPerformance(model = fitXGB1, 
+                 predictors = testPred, 
+                 reference= testClass, 
+                 lev = c("SATISFIED", "UNSATISFIED"), 
+                 model_name = "xgbLinear")
+```
+
+```{r}
+# Make a submission
+myPred <- predict(fitXGB1, tidy_test)
+submission <- data.frame(ID = tidy_test$ID, TARGET = as.integer(myPred)-1)
+write.csv(submission, file.path(".", "Submissions", "submissionXGB1.csv"),
+          row.names = F)
+```
+
+0.504080, 3485/3658, +7
+
+Stop Parallel Processing
+```{r STOP_PARALLEL}
+stopCluster(cl)
+```
