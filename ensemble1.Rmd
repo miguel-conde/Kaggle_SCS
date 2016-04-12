@@ -1,0 +1,252 @@
+---
+title: "Ensemble 1"
+author: "Miguel Conde"
+date: "12 de abril de 2016"
+output: html_document
+---
+
+```{r}
+library(knitr)
+opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+```{r}
+library(caret)
+library(caretEnsemble)
+library(doParallel)
+source("common.R")
+
+```
+
+```{r}
+# Load tidy_train, tidy_test
+load(file = file.path(".", "Data", "tidySets.Rda"))
+
+set.seed(mySeed)
+
+# Dataset to train models
+trainModelsIdx <- createDataPartition(tidy_train$TARGET, list = FALSE)
+
+trainModelsPred  <- tidy_train[trainModelsIdx, -c(1, ncol(tidy_train))]
+trainModelsClass <- factor(tidy_train[trainModelsIdx, "TARGET"],
+                           labels = c("SATISFIED", "UNSATISFIED"))
+
+# Dataset to train ensemble
+trainEnsemblePred  <- tidy_train[-trainModelsIdx, -c(1, ncol(tidy_train))]
+trainEnsembleClass <- factor(tidy_train[-trainModelsIdx, "TARGET"], 
+                             labels = c("SATISFIED", "UNSATISFIED"))
+
+### Just to set up ############################
+# trainModelsPred <- trainModelsPred[1:1000, ]
+# trainModelsClass <- trainModelsClass[1:1000]
+# trainEnsemblePred <- trainEnsemblePred[1:1000, ]
+# trainEnsembleClass <- trainEnsembleClass[1:1000]
+
+```
+
+## Build models list
+```{r CARET_LIST, cache = TRUE}
+# Start Parallel Processing
+cl <- makeCluster(max(detectCores()-1,1))
+registerDoParallel(cl)
+
+classifModels <- c("gbm", "ranger", "svmRadial", "xgbLinear", "C5.0")
+
+trCtrl <- trainControl(method            = "cv",
+                       number            = numCVs,
+                       # repeats           = 3,
+                       verboseIter       = TRUE,
+                       savePredictions   = "final",
+                       classProbs        = TRUE,
+                       summaryFunction   = twoClassSummary,
+                       allowParallel     = TRUE,
+                       index             = createFolds(trainModelsClass,
+                                                       numCVs))
+
+tuneModels  <- list(nn  = caretModelSpec(method     = "nnet", 
+                                         trace      = FALSE)
+                    )
+set.seed(mySeed)
+
+modelsList <- caretList(# Arguments to pass to train() as '...' ###
+                        x          = trainModelsPred,
+                        y          = trainModelsClass, 
+                        metric     = "ROC",
+                        ###########################################
+                        # caretList() specific arguments ##########
+                        trControl  = trCtrl,
+                        methodList = classifModels,
+                        tuneList   = tuneModels
+                        ###########################################
+                        )
+
+save(modelsList,  file = file.path(".", "Models", "modelsList1.Rda"))
+
+# Stop Parallel Processing
+stopCluster(cl)
+```
+
+Compare models
+```{r COMPARE_CARET_LIST}
+resamps <- resamples(modelsList)
+summary(resamps)
+
+xyplot(resamps, what = "BlandAltman")
+dotplot(resamps)
+densityplot(resamps)
+bwplot(resamps)
+splom(resamps)
+parallelplot(resamps)
+
+diffs <- diff(resamps)
+summary(diffs)
+
+sort(resamps, decreasing = TRUE, metric = "ROC")
+```
+
+Try predicting
+```{r}
+p <- as.data.frame(predict(modelsList[],
+                           newdata = head(trainEnsemblePred)))
+head(p)
+p <- as.data.frame(predict(modelsList[], 
+                           newdata = head(trainEnsemblePred), type = "prob"))
+head(p)
+```
+
+## Build ensemble
+
+With low correlation models
+```{r CORR_MODELS}
+# ?modelCor
+
+# modelCor(resamps)
+resamps <- resamples(modelsList)
+summary(resamps)$statistics$ROC
+bestModels <- sort(resamps, 
+                   decreasing = TRUE, 
+                   metric = "ROC")
+bestModels
+modelCor(resamples(modelsList[bestModels]))
+```
+
+We'll have to choose low correlated models. By now we'll just go on.
+
+```{r ENSEMBLE}
+# Start Parallel Processing
+cl <- makeCluster(max(detectCores()-1,1))
+registerDoParallel(cl)
+
+modelsList <- modelsList[1:5]
+class(modelsList) <- "caretList"
+
+set.seed(mySeed)
+
+ensemble1 <- caretEnsemble(
+  modelsList, 
+  metric    = "ROC",
+  trControl = trainControl(method          = "cv",
+                           number          = numCVs,
+                           verboseIter     = TRUE,
+                           savePredictions = "final",
+                           classProbs      = TRUE,
+                           allowParallel   = TRUE,
+                           index           = createFolds(trainModelsClass,
+                                                         numCVs),
+                           summaryFunction = twoClassSummary)
+  )
+
+save(ensemble1,  file = file.path(".", "Models", "ensemble1.Rda"))
+
+print(ensemble1)
+summary(ensemble1) # Don't know why it fails
+summary(ensemble1$ens_model$finalModel) # This works
+
+# Stop Parallel Processing
+stopCluster(cl)
+```
+
+```{r}
+library("caTools")
+model_preds <- lapply(modelsList, predict, 
+                      newdata = trainEnsemblePred, type="prob")
+model_preds <- lapply(model_preds, function(x) x[,"UNSATISFIED"])
+model_preds <- data.frame(model_preds)
+ens_preds   <- predict(ensemble1, newdata = trainEnsemblePred, type="prob")
+model_preds$ensemble <- ens_preds
+head(model_preds)
+caTools::colAUC(model_preds, trainEnsembleClass)
+```
+
+
+## Build Stack
+```{r STACK}
+# Start Parallel Processing
+cl <- makeCluster(max(detectCores()-1,1))
+registerDoParallel(cl)
+
+set.seed(mySeed)
+
+stack1 <- caretStack(
+  modelsList, 
+  method    = "xgbLinear",
+  metric    = "ROC",
+  trControl = trainControl(method          = "cv",
+                           number          = numCVs,
+                           verboseIter     = TRUE,
+                           savePredictions = "final",
+                           classProbs      = TRUE,
+                           allowParallel   = TRUE,
+                           index           = createFolds(trainModelsClass,
+                                                         numCVs),
+                           summaryFunction = twoClassSummary)
+  )
+
+save(stack1,  file = file.path(".", "Models", "stack1.Rda"))
+
+print(stack1)
+summary(stack1) # Don't know why it fails
+summary(stack1$ens_model$finalModel) # This works
+
+# Stop Parallel Processing
+stopCluster(cl)
+```
+
+```{r}
+plot(stack1)
+plot(stack1, metric = "ROC")
+plot(stack1, metric = "Sens")
+plot(stack1, metric = "Spec")
+plot(stack1, plotType = "level")
+# resampleHist(stack1)
+# varImp(stack1, top = 20)
+# plot(varImp(stack1, top = 20))
+```
+
+```{r}
+library("caTools")
+model_preds <- lapply(modelsList, predict, 
+                      newdata = trainEnsemblePred, type="prob")
+model_preds <- lapply(model_preds, function(x) x[,"UNSATISFIED"])
+model_preds <- data.frame(model_preds)
+ens_preds   <- predict(stack1, newdata = trainEnsemblePred, type="prob")
+model_preds$stack <- ens_preds
+head(model_preds)
+caTools::colAUC(model_preds, trainEnsembleClass)
+
+```
+
+## Submissions
+Order: nn, gbm, xgbLinear, stack1, ranger
+
+```{r}
+makeASubmission(stack1$models$nn, "Ens1_NN1.csv")
+makeASubmission(stack1$models$gbm, "Ens1_GBM1.csv")
+makeASubmission(stack1$models$xgbLinear, "Ens1_XGBLINEAR1.csv")
+makeASubmission(stack1$models$ranger, "Ens1_RANGER1.csv")
+```
+
+NN: 0.819533, +0.012221, 2657/3712 +107
+GBM: 0.589115
+XGB: 0.631689
+RANGER:0.775851

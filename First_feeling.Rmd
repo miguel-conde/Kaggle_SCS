@@ -148,7 +148,7 @@ tidy_train <- new_all_data[trainIdx,]
 tidy_test  <- new_all_data[-trainIdx,]
 tidy_test$TARGET <- NULL
 
-save(tidy_train, tidy_train, 
+save(tidy_train, tidy_test, 
      file = file.path(".", "Data", "tidySets.Rda"))
 
 
@@ -222,6 +222,9 @@ modelPerformance(model = fitBchMk,
                  reference= testClass, 
                  lev = c("SATISFIED", "UNSATISFIED"), 
                  model_name = "glm")
+
+# Stop Parallel Processing
+stopCluster(cl)
 ```
 
 ```{r}
@@ -236,11 +239,6 @@ write.csv(submission, file.path(".", "Submissions", "submissionBchMk.csv"),
 
 0.501289, 3490/3658
 
-
-Stop Parallel Processing
-```{r STOP_PARALLEL1}
-stopCluster(cl)
-```
 
 ## Something stronger
 ```{r MODEL_XGB, cache=TRUE}
@@ -283,6 +281,9 @@ modelPerformance(model = fitXGB1,
                  reference= testClass, 
                  lev = c("SATISFIED", "UNSATISFIED"), 
                  model_name = "xgbLinear")
+
+# Stop Parallel Processing
+stopCluster(cl)
 ```
 
 ```{r}
@@ -295,10 +296,6 @@ write.csv(submission, file.path(".", "Submissions", "submissionXGB1.csv"),
 
 0.504080, 3485/3658, +7
 
-Stop Parallel Processing
-```{r STOP_PARALLEL2}
-stopCluster(cl)
-```
 
 ## Submitting probs
 
@@ -313,6 +310,7 @@ makeASubmission(fitXGB1, "submissionXGB2.csv")
 ```
 
 0.600876, 3198/3661, +287
+0.631689
 
 ```{r}
 # Make a submission

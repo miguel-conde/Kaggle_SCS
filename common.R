@@ -1,3 +1,6 @@
+mySeed <- 1234
+numCVs <- 3
+
 # Make a submission
 makeASubmission <- function (fitModel, fileName) {
   myPred <- predict(fitModel, tidy_test, type ="prob")
