@@ -12,8 +12,6 @@ opts_chunk$set(warning = FALSE, message = FALSE)
 
 ```{r}
 source("common.R")
-
-mySeed <- 1234
 ```
 
 
@@ -177,7 +175,6 @@ save(trainPred, trainClass, trainIds,
      testPred, testClass, testIds,
      file = file.path(".", "Data", "train_and_test_pred_class_and_ids.Rda"))
 
-numCVs <- 3
 trCtrl <- trainControl(method            = "cv",
                        number            = numCVs,
                        # repeats           = 3,

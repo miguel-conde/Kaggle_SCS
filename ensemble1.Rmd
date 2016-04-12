@@ -16,6 +16,9 @@ library(caretEnsemble)
 library(doParallel)
 source("common.R")
 
+# Start Parallel Processing
+cl <- makeCluster(max(detectCores()-1,1))
+registerDoParallel(cl)
 ```
 
 ```{r}
@@ -46,11 +49,9 @@ trainEnsembleClass <- factor(tidy_train[-trainModelsIdx, "TARGET"],
 
 ## Build models list
 ```{r CARET_LIST, cache = TRUE}
-# Start Parallel Processing
-cl <- makeCluster(max(detectCores()-1,1))
-registerDoParallel(cl)
 
-classifModels <- c("gbm", "ranger", "svmRadial", "xgbLinear", "C5.0")
+classifModels <- c("gbm", "ranger", "svmRadial", "xgbLinear", "AdaBag",
+                   "AdaBoost.M1", "glm", "glmboost", "xgbTree", "LogitBoost")
 
 trCtrl <- trainControl(method            = "cv",
                        number            = numCVs,
@@ -82,8 +83,6 @@ modelsList <- caretList(# Arguments to pass to train() as '...' ###
 
 save(modelsList,  file = file.path(".", "Models", "modelsList1.Rda"))
 
-# Stop Parallel Processing
-stopCluster(cl)
 ```
 
 Compare models
@@ -132,12 +131,21 @@ modelCor(resamples(modelsList[bestModels]))
 
 We'll have to choose low correlated models. By now we'll just go on.
 
-```{r ENSEMBLE}
-# Start Parallel Processing
-cl <- makeCluster(max(detectCores()-1,1))
-registerDoParallel(cl)
+```{r}
+model_preds <- lapply(modelsList, predict, 
+                      newdata = trainEnsemblePred, type="prob")
+model_preds <- lapply(model_preds, function(x) x[,"UNSATISFIED"])
+model_preds <- data.frame(model_preds)
+modCorr <- findCorrelation(cor(model_preds), cutoff = 0.75)
+lowCorModels <- names(modelsList)[-modCorr]
+lowCorModels
+cor(model_preds[lowCorModels])
+```
 
-modelsList <- modelsList[1:5]
+
+```{r ENSEMBLE, cache = TRUE}
+
+modelsList <- modelsList[lowCorModels]
 class(modelsList) <- "caretList"
 
 set.seed(mySeed)
@@ -162,8 +170,6 @@ print(ensemble1)
 summary(ensemble1) # Don't know why it fails
 summary(ensemble1$ens_model$finalModel) # This works
 
-# Stop Parallel Processing
-stopCluster(cl)
 ```
 
 ```{r}
@@ -180,11 +186,7 @@ caTools::colAUC(model_preds, trainEnsembleClass)
 
 
 ## Build Stack
-```{r STACK}
-# Start Parallel Processing
-cl <- makeCluster(max(detectCores()-1,1))
-registerDoParallel(cl)
-
+```{r STACK, cache = TRUE}
 set.seed(mySeed)
 
 stack1 <- caretStack(
@@ -208,8 +210,6 @@ print(stack1)
 summary(stack1) # Don't know why it fails
 summary(stack1$ens_model$finalModel) # This works
 
-# Stop Parallel Processing
-stopCluster(cl)
 ```
 
 ```{r}
@@ -225,12 +225,17 @@ plot(stack1, plotType = "level")
 
 ```{r}
 library("caTools")
-model_preds <- lapply(modelsList, predict, 
-                      newdata = trainEnsemblePred, type="prob")
-model_preds <- lapply(model_preds, function(x) x[,"UNSATISFIED"])
-model_preds <- data.frame(model_preds)
-ens_preds   <- predict(stack1, newdata = trainEnsemblePred, type="prob")
-model_preds$stack <- ens_preds
+# model_preds <- lapply(modelsList, predict, 
+#                       newdata = trainEnsemblePred, type="prob")
+# model_preds <- lapply(model_preds, function(x) x[,"UNSATISFIED"])
+# model_preds <- data.frame(model_preds)
+# ens_preds   <- predict(stack1, newdata = trainEnsemblePred, type="prob")
+# model_preds$stack <- ens_preds
+
+model_preds <- ensembleProbs(modelsList    = modelsList, 
+                             modelEnsemble = stack1, 
+                             newdata       = trainEnsemblePred, 
+                             levName       = "UNSATISFIED")
 head(model_preds)
 caTools::colAUC(model_preds, trainEnsembleClass)
 
@@ -239,7 +244,7 @@ caTools::colAUC(model_preds, trainEnsembleClass)
 ## Submissions
 Order: nn, gbm, xgbLinear, stack1, ranger
 
-```{r}
+```{r eval = FALSE}
 makeASubmission(stack1$models$nn, "Ens1_NN1.csv")
 makeASubmission(stack1$models$gbm, "Ens1_GBM1.csv")
 makeASubmission(stack1$models$xgbLinear, "Ens1_XGBLINEAR1.csv")
@@ -250,3 +255,46 @@ NN: 0.819533, +0.012221, 2657/3712 +107
 GBM: 0.589115
 XGB: 0.631689
 RANGER:0.775851
+
+## Tailor made ensembles
+```{r TAILOR_MADE_ENSEM, cache=TRUE}
+lowCorProbs <- model_preds[, names(modelsList[lowCorModels])]
+meanLowCorProbs <- apply(lowCorProbs, 1, mean)
+colAUC(cbind(lowCorProbs, mean = meanLowCorProbs), trainEnsembleClass)
+
+
+set.seed(mySeed)
+
+trCtrl <- trainControl(method            = "cv",
+                       number            = numCVs,
+                       # repeats           = 3,
+                       verboseIter       = TRUE,
+                       savePredictions   = "final",
+                       classProbs        = TRUE,
+                       summaryFunction   = twoClassSummary,
+                       allowParallel     = TRUE,
+                       index             = createFolds(trainEnsembleClass,
+                                                       numCVs))
+
+fitEnsem <- train(x = lowCorProbs, y = trainEnsembleClass,
+                  method = "nnet",
+                  preProcess = NULL,
+                  #..., 
+                  weights    = NULL,
+                  metric     = "ROC", 
+                  trControl  = trCtrl, 
+                  tuneGrid   = NULL, 
+                  tuneLength = 3)
+
+save(fitEnsem,  file = file.path(".", "Models", "fitEnsem.Rda"))
+
+ens_preds   <- predict(fitEnsem, newdata = lowCorProbs, type="prob")
+colAUC(cbind(lowCorProbs, ensemble = ens_preds[, "UNSATISFIED"]),
+       trainEnsembleClass)
+```
+
+```{r}
+# Stop Parallel Processing
+stopCluster(cl)
+```
+
