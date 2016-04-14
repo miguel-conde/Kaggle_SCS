@@ -293,6 +293,51 @@ colAUC(cbind(lowCorProbs, ensemble = ens_preds[, "UNSATISFIED"]),
        trainEnsembleClass)
 ```
 
+### New submissions
+```{r}
+LC_modelsLists <- modelsList[names(modelsList[lowCorModels])]
+class(LC_modelsLists) <- "caretList"
+model_test_preds <- lapply(LC_modelsLists, predict, 
+                      newdata = tidy_test, type="prob")
+model_test_preds <- lapply(model_test_preds, function(x) x[,"UNSATISFIED"])
+model_test_preds <- data.frame(model_test_preds)
+
+lowCorProbs <- model_test_preds[, -2]
+predMeanLowCorProbs <- apply(lowCorProbs, 1, mean)
+
+submission <- data.frame(ID = tidy_test$ID, 
+                         TARGET = predMeanLowCorProbs)
+writeSubFile("predMeanLowCorProbs.csv", submission)
+```
+0.739066
+
+```{r}
+
+ens_test_preds   <- predict(fitEnsem, newdata = lowCorProbs, type="prob")
+submission <- data.frame(ID = tidy_test$ID, 
+                         TARGET = ens_test_preds$UNSATISFIED)
+writeSubFile(file.path(".", "Submissions", "ens_test_preds.csv"), 
+             submission)
+
+```
+
+```{r}
+makeASubmission(modelsList$xgbTree, "xgbTree.csv")
+makeASubmission(modelsList$AdaBoost.M1, "AdaBoost.M1.csv")
+makeASubmission(modelsList$glm, "glm.csv")
+makeASubmission(modelsList$glmboost, "glmboost.csv")
+makeASubmission(modelsList$LogitBoost, "LogitBoost.csv")
+makeASubmission(modelsList$svmRadial, "svmRadial.csv")
+makeASubmission(modelsList$AdaBag, "AdaBag.csv")
+```
+xgbTree: 0.619140
+AdaBoost.M1: 0.820544 +0.001011, 2709/3798 +10
+glm: 0.807312
+glmboost:0.776959
+LogitBoost: 0.550619
+svmRadial:
+AdaBag: 0.5
+
 ```{r}
 # Stop Parallel Processing
 stopCluster(cl)
